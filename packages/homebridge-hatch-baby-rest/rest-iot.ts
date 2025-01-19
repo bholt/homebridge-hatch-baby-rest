@@ -3,15 +3,18 @@ import {
   Product,
   RestIotRoutine,
   RestIotState,
+  AudioTrack
 } from '../shared/hatch-sleep-types'
 import { distinctUntilChanged, map } from 'rxjs/operators'
 import { BaseDevice } from '../shared/base-accessory'
-import { IotDevice } from './iot-device'
+import { IotDevice, convertToPercentage, MAX_IOT_VALUE, convertFromPercentage } from './iot-device'
 import { BehaviorSubject } from 'rxjs'
 import { thingShadow as AwsIotDevice } from 'aws-iot-device-sdk'
 import { apiPath, RestClient } from './rest-client'
+import { LightAndSoundMachine } from '../shared/light-and-sound-machine'
+import { HsbColor, hsbToRgb, rgbToHsb } from '../shared/colors'
 
-export class RestIot extends IotDevice<RestIotState> implements BaseDevice {
+export class RestIot extends IotDevice<RestIotState> implements BaseDevice, LightAndSoundMachine {
   readonly model =
     this.info.product === Product.restoreIot
       ? 'Restore IoT'
@@ -34,6 +37,54 @@ export class RestIot extends IotDevice<RestIotState> implements BaseDevice {
 
   onFirmwareVersion = this.onState.pipe(map((state) => state.deviceInfo.f))
 
+  onVolume = this.onState.pipe(
+    map((state) => convertToPercentage(state.a.v)),
+    distinctUntilChanged(),
+  )
+
+  onAudioTrack = this.onState.pipe(
+    map((state) => state.a.t),
+    distinctUntilChanged(),
+  )
+
+  onAudioPlaying = this.onAudioTrack.pipe(
+    map((track) => track !== AudioTrack.None),
+    distinctUntilChanged(),
+  )
+
+  onIsPowered = this.onState.pipe(
+    map((state) => state.isPowered),
+    distinctUntilChanged(),
+  )
+
+  onBrightness = this.onState.pipe(
+    map(({ c }) => {
+      if (c.r === 0 && c.g === 0 && c.b === 0 && !c.R && !c.W) {
+        // when "no" color is selected in Rest app, i (intensity) doesn't get set to 0, but everything else does
+        return 0
+      }
+      return convertToPercentage(c.i)
+    }),
+    distinctUntilChanged(),
+  )
+
+  onHsb = this.onState.pipe(map((state) => rgbToHsb(state.c, MAX_IOT_VALUE)))
+
+  onHue = this.onHsb.pipe(
+    map(({ h }) => h),
+    distinctUntilChanged(),
+  )
+
+  onSaturation = this.onHsb.pipe(
+    map(({ s }) => s),
+    distinctUntilChanged(),
+  )
+
+  onBatteryLevel = this.onState.pipe(
+    map((state) => state.deviceInfo.b),
+    distinctUntilChanged(),
+  )
+
   private setCurrent(
     playing: RestIotState['current']['playing'],
     step: number,
@@ -46,6 +97,51 @@ export class RestIot extends IotDevice<RestIotState> implements BaseDevice {
         srId,
       },
     })
+  }
+
+  setPower(on: boolean) {
+    this.update({
+      isPowered: on,
+    })
+  }
+
+  setHsb({ h, s, b }: HsbColor) {
+    // NOTE: lights assume 100% brightness in color calculations
+    const rgb = hsbToRgb({ h, s, b: 100 }, MAX_IOT_VALUE)
+
+    this.update({
+      current: {
+        color: {
+          ...rgb,
+          i: convertFromPercentage(b),
+          r: false,
+          w: false,
+        }
+      }
+    })
+  }
+
+  setVolume(percentage: number) {
+    this.update({
+      a: {
+        v: convertFromPercentage(percentage),
+      },
+    })
+  }
+
+  setAudioTrack(audioTrack: AudioTrack) {
+    this.update({
+      a: {
+        t: audioTrack,
+      },
+    })
+  }
+
+  setAudioPlaying(playing: boolean) {
+    if (!playing) {
+      return this.setAudioTrack(AudioTrack.None)
+    }
+    // do nothing for other audio tracks.  They will be handed to `setAudioTrack` directly
   }
 
   async turnOnRoutine() {
